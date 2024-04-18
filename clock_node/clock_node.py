@@ -38,12 +38,12 @@ def parse_time_string(time_string):
                 seconds=dt.second,
                 microseconds=dt.microsecond,
             )
-            return int(round(delta.total_seconds() * 1000))
+            return int(delta.total_seconds() * 1000)
         except ValueError:
             pass
     else:
         try:
-            return int(round(float(time_string)))
+            return int(time_string)
         except ValueError:
             raise ValueError(f"Invalid time string: {time_string}")
 
@@ -75,15 +75,12 @@ class ClockNode(Node):
         try:
             self._clock_connection = serial.Serial(self._clock_port, 9600, timeout=2)
         except serial.SerialException:
-            self.get_logger().error(
-                f"Could not connect to chess clock at {self._clock_port}")
+            self.get_logger().error(f"Could not connect to chess clock at {self._clock_port}")
             self._clock_connection = None
 
         # Initialize the clock.
-        self._time_base = parse_time_string(
-            self.get_parameter("time_base").value)
-        self._time_increment = parse_time_string(
-            self.get_parameter("time_increment").value)
+        self._time_base = parse_time_string(self.get_parameter("time_base").value)
+        self._time_increment = parse_time_string(self.get_parameter("time_increment").value)
         self._white_time_left = self._time_base
         self._black_time_left = self._time_base
         self._paused = False
@@ -132,29 +129,12 @@ class ClockNode(Node):
         self.restart(self._time_base, self._time_increment)
 
         # Create timer for periodically polling the clock.
-        self._clock_timer = self.create_timer(
-            0.01, self.clock_timer_callback)  # 100 Hz
+        self._clock_timer = self.create_timer(0.01, self.clock_timer_callback)  # 100 Hz
 
     def destroy(self):
         if self._clock_connection is not None:
             self._clock_connection.close()
         super().destroy_node()
-
-    def get_clock_connection(self):
-        """
-        Gets the connection to the chess clock. If the connection is `None`, attempts to reconnect
-        to the clock.
-        """
-        if self._clock_connection is None:
-            self.get_logger().warn("Clock is not connected; attempting to reconnect")
-            try:
-                self._clock_connection = serial.Serial(self._clock_port, 9600, timeout=2)
-            except serial.SerialException:
-                self.get_logger().error(
-                    f"Could not connect to chess clock at {self._clock_port}")
-                self._clock_connection = None
-
-        return self._clock_connection
 
     def poll_clock(self):
         """
@@ -162,15 +142,17 @@ class ClockNode(Node):
 
         :return: The message received from the clock, or `None`
         """
-        if self.get_clock_connection() is None:
+        if self._clock_connection is None:
             self.get_logger().error("Clock is not connected; cannot poll")
             return None
-        msg = str(self.get_clock_connection().readline())
+        msg = str(self._clock_connection.readline())
         if not "\n" in msg:
             self.get_logger().warn("Clock timed out")
             return None
         if msg.strip() == "ack":
             self._acks_received += 1
+        else:
+            self.handle_message(msg)
         return msg
 
     def wait_for_ack(self):
@@ -178,7 +160,7 @@ class ClockNode(Node):
         Waits for an acknowledgement from the clock. If no acknowledgement is received, logs an
         error and returns False.
         """
-        if self.get_clock_connection() is None:
+        if self._clock_connection is None:
             self.get_logger().error("Clock is not connected")
             return False
         while self._acks_received < 1:
@@ -186,7 +168,6 @@ class ClockNode(Node):
             if msg is None:
                 self.get_logger().error("Did not receive ack in time")
                 return False
-            self.handle_message(msg)
         self._acks_received -= 1
         return True
 
@@ -203,17 +184,22 @@ class ClockNode(Node):
             f"Setting game time to W:{request.time.white_time_left} B:{request.time.black_time_left}"
         )
 
-        if self.get_clock_connection() is None:
+        if self._clock_connection is None:
             self.get_logger().error("Clock is not connected")
             response.success = False
             return response
 
         cmd = f"set w {request.time.white_time_left} b {request.time.black_time_left}\n"
         self.get_logger().info(f"Writing {cmd}")
-        self._clock_connection.write(bytes(cmd, encoding='utf-8'))
-        if not self.wait_for_ack():
+        written = self._clock_connection.write(bytes(cmd, encoding="utf-8"))
+        if written != len(cmd):
             self.get_logger().error(
-                f"Clock did not acknowledge command `{cmd}`")
+                f"Could not write to clock. Wrote {written} bytes of {len(cmd)}"
+            )
+            response.success = False
+            return response
+        if not self.wait_for_ack():
+            self.get_logger().error(f"Clock did not acknowledge command `{cmd}`")
             response.success = False
             return response
 
@@ -239,17 +225,20 @@ class ClockNode(Node):
             f"Restarting game with time_base={new_time_base}, time_increment={new_time_increment}"
         )
 
-        if self.get_clock_connection() is None:
+        if self._clock_connection is None:
             self.get_logger().error("Clock is not connected")
             return False
 
         cmd = f"rst {new_time_base} {new_time_increment}\n"
         self.get_logger().info(f"Writing {cmd}")
-        # self._clock_connection.write(bytes(cmd, encoding='ASCII'))
-        self._clock_connection.write(cmd.encode(encoding='utf-8'))
-        if not self.wait_for_ack():
+        written = self._clock_connection.write(cmd.encode(encoding="utf-8"))
+        if written != len(cmd):
             self.get_logger().error(
-                f"Clock did not acknowledge command `{cmd}`")
+                f"Could not write to clock. Wrote {written} bytes of {len(cmd)}"
+            )
+            return False
+        if not self.wait_for_ack():
+            self.get_logger().error(f"Clock did not acknowledge command `{cmd}`")
             return False
 
         self._white_time_left = new_time_base
@@ -263,8 +252,9 @@ class ClockNode(Node):
 
         self._time_base = new_time_base
         self._time_increment = new_time_increment
-        self._game_config_pub.publish(GameConfig(
-            time_base=new_time_base, time_increment=new_time_increment))
+        self._game_config_pub.publish(
+            GameConfig(time_base=new_time_base, time_increment=new_time_increment)
+        )
         return True
 
     def clock_timer_callback(self):
@@ -273,14 +263,13 @@ class ClockNode(Node):
         accordingly.
         """
 
-        if self.get_clock_connection() is None:
+        if self._clock_connection is None:
             return
 
         msg = self.poll_clock()
         if msg is None:
             self.get_logger().warn("Could not poll clock")
             return
-        self.handle_message(msg)
 
     def handle_message(self, msg):
         """
