@@ -3,6 +3,7 @@ from rcl_interfaces.msg import ParameterDescriptor
 from rclpy.node import Node
 import serial
 import re
+import time
 from datetime import datetime, timedelta
 from chess_msgs.msg import GameConfig, ChessTime, ClockButtons
 from chess_msgs.srv import SetTime, RestartClock
@@ -56,7 +57,7 @@ class ClockNode(Node):
         # Declare parameters.
         self.declare_parameter(
             "clock_port",
-            "/dev/ttyACM0",
+            "/dev/ttyACM1",
             ParameterDescriptor(description="Path to the clock serial port"),
         )
         self.declare_parameter(
@@ -66,14 +67,16 @@ class ClockNode(Node):
         )
         self.declare_parameter(
             "time_increment",
-            "0:05",
+            "1:00",
             ParameterDescriptor(description="Time increment for each move"),
         )
 
         # Try to connect to the clock. If it fails, log an error and continue.
         self._clock_port = self.get_parameter("clock_port").value
         try:
-            self._clock_connection = serial.Serial(self._clock_port, 9600, timeout=2)
+            self._clock_connection = serial.Serial("/dev/ttyACM0", baudrate=9600, timeout=2)
+            time.sleep(3)
+            self.get_logger().info("Clock connected")
         except serial.SerialException:
             self.get_logger().error(f"Could not connect to chess clock at {self._clock_port}")
             self._clock_connection = None
@@ -146,9 +149,10 @@ class ClockNode(Node):
             self.get_logger().error("Clock is not connected; cannot poll")
             return None
         msg = str(self._clock_connection.readline())
-        if not "\n" in msg:
-            self.get_logger().warn("Clock timed out")
-            return None
+        msg = msg.replace('\r\n', '\n')
+        # if not '\n' in msg:
+        #     self.get_logger().warn("Clock timed out")
+        #     return None
         if msg.strip() == "ack":
             self._acks_received += 1
         else:
@@ -276,7 +280,7 @@ class ClockNode(Node):
         Handle a message from the clock.
         """
 
-        m = re.match(
+        m = re.search(
             r"upd w (\d+) b (\d+) t (white|black) p (true|false) a (true|false)", msg.strip()
         )
         if m:
@@ -294,7 +298,7 @@ class ClockNode(Node):
             )
             return
 
-        m = re.match(r"btn w (true|false) b (true|false)", msg.strip())
+        m = re.search(r"btn w (true|false) b (true|false)", msg.strip())
         if m:
             self._white_btn_pressed = m.group(1) == "true"
             self._black_btn_pressed = m.group(2) == "true"
